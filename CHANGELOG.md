@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.5
+
+### Patch Changes
+
+- [#56](https://github.com/open-mqtt-bridges/roborock/pull/56) [`7186628`](https://github.com/open-mqtt-bridges/roborock/commit/718662832341cf8f79fc7633ecb14c4f71945a44) Thanks [@tobiaswaelde](https://github.com/tobiaswaelde)! - Remove unused npm and its bundled vulnerable dependencies from the runtime container image.
+
 ## 1.0.4
 
 ### Patch Changes
