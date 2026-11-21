@@ -446,6 +446,20 @@ export class Roborock extends HttpMqttBridge<RoborockConfig> {
       void this.switchMap(deviceId, mapId);
       this.mqtt.publish(topic, null);
     });
+
+    const roomsTopic = `${this.cfg.topic}/devices/+/command/rooms`;
+    this.subscribe(roomsTopic, (topic, payload) => {
+      if (!payload.trim()) return;
+      const deviceId = this.commandDeviceId(topic, '/command/rooms');
+      const request = deviceId ? this.parseRoomCleanRequest(deviceId, payload) : undefined;
+      if (!deviceId || !request) {
+        this.logger.warn(`Invalid Roborock room-clean command on ${topic}.`);
+        return;
+      }
+
+      void this.cleanRooms(deviceId, request);
+      this.mqtt.publish(topic, null);
+    });
   }
 
   /** Checks that a decoded MQTT payload is a supported Roborock command. */
@@ -454,7 +468,7 @@ export class Roborock extends HttpMqttBridge<RoborockConfig> {
     return (
       !!command &&
       typeof command.command === 'string' &&
-      Object.hasOwn(COMMAND_METHODS, command.command) &&
+      (command.command === 'wash' || Object.hasOwn(COMMAND_METHODS, command.command)) &&
       (command.options === undefined || asRecord(command.options) !== undefined)
     );
   }
@@ -526,10 +540,99 @@ export class Roborock extends HttpMqttBridge<RoborockConfig> {
     }
 
     try {
-      await client[COMMAND_METHODS[command.command]](deviceId, command.options);
+      if (command.command === 'wash') {
+        const messageQueueHandler = (client as RoborockClient & RoborockMapClient).messageQueueHandler;
+        if (!messageQueueHandler) {
+          this.logger.warn('Ignored Roborock wash command because messageQueueHandler is unavailable.');
+          return;
+        }
+        await messageQueueHandler.sendRequest(deviceId, 'app_start_wash', [], false);
+      } else {
+        await client[COMMAND_METHODS[command.command]](deviceId, command.options);
+      }
       this.scheduleStatusRefresh(client, deviceId);
     } catch (error) {
       this.logError(`Failed to execute Roborock ${command.command} for ${deviceId}.`, error);
+    }
+  }
+
+  /** Parses segment IDs and optional floor/repeat settings from a command/rooms payload. */
+  private parseRoomCleanRequest(
+    deviceId: string,
+    payload: string,
+  ): { mapId?: number; repeat?: number; segments: number[] } | undefined {
+    const trimmed = payload.trim();
+    if (!trimmed) return;
+
+    if (/^\d+(?:\s*,\s*\d+)*$/.test(trimmed)) {
+      const segments = trimmed.split(',').map((part) => Number(part.trim()));
+      return segments.every((id) => Number.isSafeInteger(id) && id > 0) ? { segments } : undefined;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed) as unknown;
+    } catch {
+      return;
+    }
+
+    if (Array.isArray(parsed)) {
+      const segments = parsed.filter(
+        (id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0,
+      );
+      return segments.length > 0 && segments.length === parsed.length ? { segments } : undefined;
+    }
+
+    const record = asRecord(parsed);
+    if (!record || !Array.isArray(record.rooms)) return;
+    const segments = record.rooms.filter(
+      (id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0,
+    );
+    if (segments.length === 0 || segments.length !== record.rooms.length) return;
+
+    let mapId: number | undefined;
+    if (record.map !== undefined) {
+      if (typeof record.map !== 'number' && typeof record.map !== 'string') return;
+      mapId = this.resolveMapId(deviceId, String(record.map));
+      if (mapId === undefined) return;
+    }
+
+    let repeat: number | undefined;
+    if (record.repeat !== undefined) {
+      if (typeof record.repeat !== 'number' || !Number.isInteger(record.repeat) || record.repeat < 1) return;
+      repeat = record.repeat;
+    }
+
+    return { mapId, repeat, segments };
+  }
+
+  /** Optionally switches floor and starts segment-based room cleaning. */
+  private async cleanRooms(deviceId: string, request: { mapId?: number; repeat?: number; segments: number[] }) {
+    const client = this.client;
+    if (!client || !client.isInited()) {
+      this.logger.warn('Ignored Roborock room-clean command because the account is not connected.');
+      return;
+    }
+
+    const mapClient = client as RoborockClient & RoborockMapClient;
+    if (typeof client.app_segment_clean_by_ids !== 'function') {
+      this.logger.warn('Ignored Roborock room-clean command because app_segment_clean_by_ids is unavailable.');
+      return;
+    }
+
+    try {
+      if (request.mapId !== undefined && mapClient.getCurrentMapIdForDevice?.(deviceId) !== request.mapId) {
+        if (typeof mapClient.load_multi_map !== 'function') {
+          this.logger.warn('Ignored Roborock room-clean map switch because load_multi_map is unavailable.');
+          return;
+        }
+        await mapClient.load_multi_map(deviceId, request.mapId);
+      }
+
+      await client.app_segment_clean_by_ids(deviceId, request.segments, { repeat: request.repeat });
+      this.scheduleStatusRefresh(client, deviceId);
+    } catch (error) {
+      this.logError(`Failed to clean Roborock rooms [${request.segments.join(', ')}] for ${deviceId}.`, error);
     }
   }
 

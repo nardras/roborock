@@ -28,7 +28,9 @@ declare module 'homebridge-roborock-matter/roborockLib/roborockAPI' {
     constructor(options: RoborockOptions);
     app_charge(duid: string, options?: Record<string, unknown>): Promise<void>;
     app_pause(duid: string, options?: Record<string, unknown>): Promise<void>;
+    app_segment_clean_by_ids?(duid: string, segments: number[], options?: { repeat?: number }): Promise<void>;
     app_start(duid: string, options?: Record<string, unknown>): Promise<void>;
+    app_start_collect_dust(duid: string, options?: Record<string, unknown>): Promise<void>;
     app_stop(duid: string, options?: Record<string, unknown>): Promise<void>;
     find_me(duid: string, options?: Record<string, unknown>): Promise<void>;
     getMapListForDevice?(duid: string): Array<{ mapId: number; name: string }>;

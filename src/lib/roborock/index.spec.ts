@@ -464,4 +464,67 @@ describe('Roborock', () => {
     );
     bridge.destroy();
   });
+
+  it('cleans specific rooms with optional map switching and supports wash/collect_dust commands', async () => {
+    const subscriptions = new Map<string, (topic: string, payload: string) => void>();
+    const publish = jest.fn<MqttBridgeClient['publish']>();
+    const mqtt = {
+      publish,
+      subscribe: jest.fn<MqttBridgeClient['subscribe']>((topic, handler) => {
+        subscriptions.set(topic, handler);
+        return jest.fn();
+      }),
+    } as unknown as MqttBridgeClient;
+    const bridge = new Roborock(cfg, mqtt);
+    const appSegmentClean = jest.fn<(...args: unknown[]) => Promise<void>>().mockResolvedValue(undefined);
+    const appStartCollectDust = jest.fn<(...args: unknown[]) => Promise<void>>().mockResolvedValue(undefined);
+    const loadMultiMap = jest.fn<(...args: unknown[]) => Promise<void>>().mockResolvedValue(undefined);
+    const sendRequest = jest.fn<(...args: unknown[]) => Promise<unknown>>().mockResolvedValue(undefined);
+    const client = {
+      app_segment_clean_by_ids: appSegmentClean,
+      app_start_collect_dust: appStartCollectDust,
+      getCurrentMapIdForDevice: jest.fn(() => 0),
+      getMapListForDevice: jest.fn(() => [
+        { mapId: 0, name: 'Erdgeschoss' },
+        { mapId: 1, name: 'Obergeschoss' },
+      ]),
+      getStatus: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+      isInited: jest.fn(() => true),
+      load_multi_map: loadMultiMap,
+      messageQueueHandler: { sendRequest },
+      stopService: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    };
+    const instance = bridge as unknown as {
+      client?: object;
+      subscribeCommands(): void;
+    };
+    instance.client = client;
+    instance.subscribeCommands();
+
+    const roomsHandler = subscriptions.get('home/roborock/devices/+/command/rooms');
+    const jsonHandler = subscriptions.get('home/roborock/devices/+/command/json');
+    expect(roomsHandler).toBeDefined();
+    expect(jsonHandler).toBeDefined();
+
+    roomsHandler!('home/roborock/devices/robot-1/command/rooms', '19,20');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(loadMultiMap).not.toHaveBeenCalled();
+    expect(appSegmentClean).toHaveBeenNthCalledWith(1, 'robot-1', [19, 20], { repeat: undefined });
+
+    roomsHandler!(
+      'home/roborock/devices/robot-1/command/rooms',
+      JSON.stringify({ map: 'Obergeschoss', repeat: 2, rooms: [16] }),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(loadMultiMap).toHaveBeenCalledWith('robot-1', 1);
+    expect(appSegmentClean).toHaveBeenNthCalledWith(2, 'robot-1', [16], { repeat: 2 });
+
+    jsonHandler!('home/roborock/devices/robot-1/command/json', JSON.stringify({ command: 'collect_dust' }));
+    jsonHandler!('home/roborock/devices/robot-1/command/json', JSON.stringify({ command: 'wash' }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(appStartCollectDust).toHaveBeenCalledWith('robot-1', undefined);
+    expect(sendRequest).toHaveBeenCalledWith('robot-1', 'app_start_wash', [], false);
+
+    bridge.destroy();
+  });
 });

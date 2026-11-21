@@ -9,6 +9,7 @@ export const REGION_CLOUD_HOSTS = {
 /** MQTT commands that the bridge is allowed to pass to the Roborock client. */
 export const COMMAND_METHODS = {
   charge: 'app_charge',
+  collect_dust: 'app_start_collect_dust',
   find: 'find_me',
   pause: 'app_pause',
   start: 'app_start',
@@ -123,7 +124,7 @@ export function humanizeRoborockEnum(field: string, value: unknown) {
 export type RoborockAuthenticationStatus = 'authenticated' | 'failed' | 'verification-code-sent';
 
 /** Command names accepted by the bridge. */
-export type RoborockCommandName = keyof typeof COMMAND_METHODS;
+export type RoborockCommandName = keyof typeof COMMAND_METHODS | 'wash';
 
 /** A supported named Roborock suction-power level. */
 export type SuctionPowerLevel = keyof typeof SUCTION_POWER_LEVELS;
