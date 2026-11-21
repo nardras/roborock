@@ -7,7 +7,7 @@ import { HttpMqttBridge } from '~/lib/http-mqtt-bridge';
 import type { MqttBridgeClient } from '~/modules/mqtt/mqtt.service';
 import type { RoborockConfig, RoborockLogLevel } from '~/types/config/roborock';
 import { asRecord, redact } from './data';
-import { storeMapImage, type RoborockMapImage } from './map';
+import { parseMapImageBuffer, storeMapImage, type RoborockMapImage } from './map';
 import {
   COMMAND_METHODS,
   humanizeRoborockEnum,
@@ -292,7 +292,7 @@ export class Roborock extends HttpMqttBridge<RoborockConfig> {
 
     const mapClient = client as RoborockClient & RoborockMapClient;
     const parser = mapClient.vacuums?.[deviceId]?.mapParser;
-    if (!mapClient.messageQueueHandler || !parser) return;
+    if (!mapClient.messageQueueHandler) return;
 
     this.mapRequests.add(deviceId);
     try {
@@ -305,8 +305,8 @@ export class Roborock extends HttpMqttBridge<RoborockConfig> {
       const hash = createHash('sha256').update(response).digest('hex');
       if (this.mapHashes.get(deviceId) === hash) return;
 
-      const parsedMap = await parser.parsedata(response);
-      const image = this.mapImage(parsedMap);
+      const parsedMap = typeof parser?.parsedata === 'function' ? await parser.parsedata(response) : undefined;
+      const image = parsedMap ? this.mapImage(parsedMap) : parseMapImageBuffer(response);
       if (!image) {
         this.logger.debug(`Roborock returned no renderable map image for ${deviceId}.`);
         return;
