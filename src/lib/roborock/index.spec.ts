@@ -362,4 +362,56 @@ describe('Roborock', () => {
       await rm(directory, { force: true, recursive: true });
     }
   });
+
+  it('publishes available floors and switches maps via command/map', async () => {
+    const subscriptions = new Map<string, (topic: string, payload: string) => void>();
+    const publish = jest.fn<MqttBridgeClient['publish']>();
+    const mqtt = {
+      publish,
+      subscribe: jest.fn<MqttBridgeClient['subscribe']>((topic, handler) => {
+        subscriptions.set(topic, handler);
+        return jest.fn();
+      }),
+    } as unknown as MqttBridgeClient;
+    const bridge = new Roborock(cfg, mqtt);
+    const loadMultiMap = jest.fn<(...args: unknown[]) => Promise<void>>().mockResolvedValue(undefined);
+    const maps = [
+      { mapId: 0, name: 'EG' },
+      { mapId: 1, name: 'OG' },
+      { mapId: 2, name: 'Keller' },
+    ];
+    const client = {
+      getMapListForDevice: jest.fn(() => maps),
+      getStatus: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+      isInited: jest.fn(() => true),
+      load_multi_map: loadMultiMap,
+      stopService: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    };
+    const instance = bridge as unknown as {
+      client?: object;
+      publishDeviceState(deviceId: string, data: unknown): void;
+      subscribeCommands(): void;
+    };
+    instance.client = client;
+    instance.subscribeCommands();
+    instance.publishDeviceState('robot-1', { battery: 98, map_status: 3 });
+
+    expect(publish).toHaveBeenCalledWith('home/roborock/devices/robot-1/maps/json', JSON.stringify(maps));
+    expect(publish).toHaveBeenCalledWith('home/roborock/devices/robot-1/maps/1/name', 'OG');
+    expect(publish).toHaveBeenCalledWith('home/roborock/devices/robot-1/maps/2/mapId', 2);
+
+    const mapHandler = subscriptions.get('home/roborock/devices/+/command/map');
+    expect(mapHandler).toBeDefined();
+
+    mapHandler!('home/roborock/devices/robot-1/command/map', '1');
+    mapHandler!('home/roborock/devices/robot-1/command/map', 'keller');
+    mapHandler!('home/roborock/devices/robot-1/command/map', 'unknown-floor');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(loadMultiMap).toHaveBeenNthCalledWith(1, 'robot-1', 1);
+    expect(loadMultiMap).toHaveBeenNthCalledWith(2, 'robot-1', 2);
+    expect(loadMultiMap).toHaveBeenCalledTimes(2);
+    expect(publish).toHaveBeenCalledWith('home/roborock/devices/robot-1/command/map', null);
+    bridge.destroy();
+  });
 });

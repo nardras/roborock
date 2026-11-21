@@ -27,6 +27,8 @@ interface RoborockSettingsClient {
 
 interface RoborockMapClient {
   getCurrentMapIdForDevice?(deviceId: string): number | null;
+  getMapListForDevice?(deviceId: string): Array<{ mapId: number; name: string }>;
+  load_multi_map?(deviceId: string, mapId: number, options?: Record<string, unknown>): Promise<void>;
   messageQueueHandler?: {
     sendRequest(deviceId: string, method: string, parameters: unknown[], secure: boolean): Promise<unknown>;
   };
@@ -400,6 +402,19 @@ export class Roborock extends HttpMqttBridge<RoborockConfig> {
       void this.setSuctionPower(deviceId, power);
       this.mqtt.publish(topic, null);
     });
+
+    const mapTopic = `${this.cfg.topic}/devices/+/command/map`;
+    this.subscribe(mapTopic, (topic, payload) => {
+      const deviceId = this.commandDeviceId(topic, '/command/map');
+      const mapId = deviceId ? this.resolveMapId(deviceId, payload) : undefined;
+      if (!deviceId || mapId === undefined) {
+        this.logger.warn(`Invalid Roborock map command on ${topic}.`);
+        return;
+      }
+
+      void this.switchMap(deviceId, mapId);
+      this.mqtt.publish(topic, null);
+    });
   }
 
   /** Checks that a decoded MQTT payload is a supported Roborock command. */
@@ -507,6 +522,47 @@ export class Roborock extends HttpMqttBridge<RoborockConfig> {
     }
   }
 
+  /** Switches the active floor/map on the vacuum. */
+  private async switchMap(deviceId: string, mapId: number) {
+    const client = this.client;
+    if (!client || !client.isInited()) {
+      this.logger.warn('Ignored Roborock map command because the account is not connected.');
+      return;
+    }
+
+    const loadMultiMap = (client as RoborockClient & RoborockMapClient).load_multi_map;
+    if (typeof loadMultiMap !== 'function') {
+      this.logger.warn('Ignored Roborock map command because load_multi_map is unavailable.');
+      return;
+    }
+
+    try {
+      await loadMultiMap.call(client, deviceId, mapId);
+      this.scheduleStatusRefresh(client, deviceId);
+    } catch (error) {
+      this.logError(`Failed to switch Roborock map to ${mapId} for ${deviceId}.`, error);
+    }
+  }
+
+  /** Resolves a numeric map ID or case-insensitive map name for one device. */
+  private resolveMapId(deviceId: string, payload: string): number | undefined {
+    const trimmed = payload.trim();
+    if (!trimmed) return;
+
+    if (/^\d+$/.test(trimmed)) {
+      const numericId = Number(trimmed);
+      return Number.isSafeInteger(numericId) && numericId >= 0 ? numericId : undefined;
+    }
+
+    const maps = (this.client as (RoborockClient & RoborockMapClient) | undefined)?.getMapListForDevice?.(deviceId);
+    if (!Array.isArray(maps)) return;
+
+    const match = maps.find(
+      (map) => typeof map.name === 'string' && map.name.trim().toLowerCase() === trimmed.toLowerCase(),
+    );
+    return match && Number.isInteger(match.mapId) && match.mapId >= 0 ? match.mapId : undefined;
+  }
+
   /** Refreshes device state shortly after the latest successfully accepted command. */
   private scheduleStatusRefresh(client: RoborockClient, deviceId: string) {
     if (this.destroyed || client !== this.client || !client.isInited()) return;
@@ -545,6 +601,7 @@ export class Roborock extends HttpMqttBridge<RoborockConfig> {
     this.publishData(topic, state);
     this.publishHumanReadableEnums(topic, state);
     this.publishRooms(deviceId, data);
+    this.publishMaps(deviceId);
 
     const code = this.findSuctionPowerCode(state);
     if (code === undefined) return;
@@ -584,6 +641,26 @@ export class Roborock extends HttpMqttBridge<RoborockConfig> {
       const roomTopic = `${topic}/${id}`;
       this.publishJson(`${roomTopic}/json`, room);
       this.publishData(roomTopic, room);
+    }
+  }
+
+  /** Publishes cached floor/map definitions for multi-floor homes. */
+  private publishMaps(deviceId: string) {
+    const maps = (this.client as (RoborockClient & RoborockMapClient) | undefined)?.getMapListForDevice?.(deviceId);
+    if (!Array.isArray(maps) || maps.length === 0) return;
+
+    const topic = `${this.deviceTopic(deviceId)}/maps`;
+    const safeMaps = maps.map((map) => redact(map));
+    this.publishJson(`${topic}/json`, safeMaps);
+
+    for (const map of safeMaps) {
+      const record = asRecord(map);
+      const id = record?.mapId;
+      if (!this.isTopicSegment(id)) continue;
+
+      const mapTopic = `${topic}/${id}`;
+      this.publishJson(`${mapTopic}/json`, map);
+      this.publishData(mapTopic, map);
     }
   }
 
