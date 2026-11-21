@@ -403,6 +403,7 @@ describe('Roborock', () => {
     const mapHandler = subscriptions.get('home/roborock/devices/+/command/map');
     expect(mapHandler).toBeDefined();
 
+    mapHandler!('home/roborock/devices/robot-1/command/map', '');
     mapHandler!('home/roborock/devices/robot-1/command/map', '1');
     mapHandler!('home/roborock/devices/robot-1/command/map', 'keller');
     mapHandler!('home/roborock/devices/robot-1/command/map', 'unknown-floor');
@@ -412,6 +413,55 @@ describe('Roborock', () => {
     expect(loadMultiMap).toHaveBeenNthCalledWith(2, 'robot-1', 2);
     expect(loadMultiMap).toHaveBeenCalledTimes(2);
     expect(publish).toHaveBeenCalledWith('home/roborock/devices/robot-1/command/map', null);
+    bridge.destroy();
+  });
+
+  it('fetches get_multi_maps_list and updates the cached map list', async () => {
+    const publish = jest.fn<MqttBridgeClient['publish']>();
+    const mqtt = { publish, subscribe: jest.fn(() => jest.fn()) } as unknown as MqttBridgeClient;
+    const bridge = new Roborock(cfg, mqtt);
+    const cachedMaps: Array<{ mapId: number; name: string }> = [];
+    const client = {
+      getMapListForDevice: jest.fn(() => cachedMaps),
+      messageQueueHandler: {
+        sendRequest: jest.fn<() => Promise<unknown>>().mockResolvedValue([
+          {
+            map_info: [
+              { mapFlag: 0, name: 'EG' },
+              { mapFlag: 1, name: 'OG' },
+              { mapFlag: 2, name: 'Keller' },
+            ],
+          },
+        ]),
+      },
+      stopService: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+      updateMapListCache: jest.fn((_duid: string, mapInfo: Array<{ mapFlag: number; name: string }>) => {
+        cachedMaps.splice(
+          0,
+          cachedMaps.length,
+          ...mapInfo.map((entry) => ({ mapId: entry.mapFlag, name: entry.name })),
+        );
+      }),
+    };
+    const instance = bridge as unknown as {
+      client?: object;
+      refreshMapList(client: object, deviceId: string): Promise<void>;
+    };
+    instance.client = client;
+
+    await instance.refreshMapList(client, 'robot-1');
+    await instance.refreshMapList(client, 'robot-1');
+
+    expect(client.messageQueueHandler.sendRequest).toHaveBeenCalledTimes(1);
+    expect(client.messageQueueHandler.sendRequest).toHaveBeenCalledWith('robot-1', 'get_multi_maps_list', [], false);
+    expect(publish).toHaveBeenCalledWith(
+      'home/roborock/devices/robot-1/maps/json',
+      JSON.stringify([
+        { mapId: 0, name: 'EG' },
+        { mapId: 1, name: 'OG' },
+        { mapId: 2, name: 'Keller' },
+      ]),
+    );
     bridge.destroy();
   });
 });

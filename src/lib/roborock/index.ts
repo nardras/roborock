@@ -29,6 +29,7 @@ interface RoborockMapClient {
   getCurrentMapIdForDevice?(deviceId: string): number | null;
   getMapListForDevice?(deviceId: string): Array<{ mapId: number; name: string }>;
   load_multi_map?(deviceId: string, mapId: number, options?: Record<string, unknown>): Promise<void>;
+  updateMapListCache?(deviceId: string, mapInfo: unknown): void;
   messageQueueHandler?: {
     sendRequest(deviceId: string, method: string, parameters: unknown[], secure: boolean): Promise<unknown>;
   };
@@ -57,6 +58,8 @@ export class Roborock extends HttpMqttBridge<RoborockConfig> {
   private connectionRetryTimer?: NodeJS.Timeout;
   private destroyed = false;
   private readonly mapHashes = new Map<string, string>();
+  private readonly mapListFetched = new Set<string>();
+  private readonly mapListRequests = new Set<string>();
   private readonly mapRequests = new Set<string>();
   private readonly statusRefreshTimers = new Map<string, NodeJS.Timeout>();
 
@@ -282,7 +285,34 @@ export class Roborock extends HttpMqttBridge<RoborockConfig> {
         serialNumber: device.serialNumber,
       };
       this.publishData(`${this.deviceTopic(device.duid)}/info`, info);
+      void this.refreshMapList(client, device.duid);
       void this.storeCurrentMap(client, device.duid);
+    }
+  }
+
+  /** Fetches the robot's saved multi-floor map list once per device so all floors are published. */
+  private async refreshMapList(client: RoborockClient, deviceId: string) {
+    if (this.mapListFetched.has(deviceId) || this.mapListRequests.has(deviceId)) return;
+
+    const mapClient = client as RoborockClient & RoborockMapClient;
+    if (!mapClient.messageQueueHandler) return;
+
+    this.mapListRequests.add(deviceId);
+    try {
+      const response = await mapClient.messageQueueHandler.sendRequest(deviceId, 'get_multi_maps_list', [], false);
+      const first = Array.isArray(response) ? response[0] : response;
+      const mapInfo = asRecord(first)?.map_info;
+      if (mapInfo) {
+        mapClient.updateMapListCache?.(deviceId, mapInfo);
+        this.publishMaps(deviceId);
+      }
+      this.mapListFetched.add(deviceId);
+    } catch (error) {
+      this.logger.debug(
+        `Could not fetch the Roborock multi-map list for ${deviceId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      this.mapListRequests.delete(deviceId);
     }
   }
 
@@ -405,6 +435,7 @@ export class Roborock extends HttpMqttBridge<RoborockConfig> {
 
     const mapTopic = `${this.cfg.topic}/devices/+/command/map`;
     this.subscribe(mapTopic, (topic, payload) => {
+      if (!payload.trim()) return;
       const deviceId = this.commandDeviceId(topic, '/command/map');
       const mapId = deviceId ? this.resolveMapId(deviceId, payload) : undefined;
       if (!deviceId || mapId === undefined) {
